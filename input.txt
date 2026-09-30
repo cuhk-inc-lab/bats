@@ -1,0 +1,9 @@
+BATS line-network simulation input.
+q=256, M=8, four nodes, in-memory queues only.
+No precoding, no sockets, no ports.
+Source splits this file into K packets.
+Each batch draws degree d from one fixed Psi, then picks d source packets.
+G stays out of the packet. The destination rebuilds it from the seed and batch id.
+Relays mix only packets that share a batch id, even when the batch is incomplete.
+The destination runs belief propagation, then inactivation.
+END
