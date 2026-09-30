@@ -34,42 +34,33 @@ void relay_forward(Vec *in, Vec *next, Rng *recode, Rng *loss, int loss_percent,
                                 in->p[s].payload, T, "");
         }
     }
-    for (j = 0; j < M; j++) {
-        Packet pkt;
-        int nz = 0;
-        uint8_t *phi_col = xmalloc((size_t)r);
-        memset(&pkt, 0, sizeof(pkt));
-        do {
-            nz = 0;
-            for (s = 0; s < r; s++) {
-                phi_col[s] = rng_byte(recode);
-                if (phi_col[s]) {
-                    nz = 1;
-                }
-            }
-        } while (!nz);
-        pkt.batch_id = (uint32_t)batch;
-        pkt.payload = xmalloc((size_t)T);
-        memset(pkt.payload, 0, (size_t)T);
+    {
+        uint8_t *coeff_in = xmalloc((size_t)r * (size_t)M);
+        uint8_t *payload_in = xmalloc((size_t)r * (size_t)T);
+        uint8_t *coeff_out = xmalloc((size_t)M * (size_t)M);
+        uint8_t *payload_out = xmalloc((size_t)M * (size_t)T);
+        int n_out = 0;
         for (s = 0; s < r; s++) {
-            uint8_t a = phi_col[s];
-            int m;
-            int t;
-            if (!a) {
-                continue;
-            }
-            for (m = 0; m < M; m++) {
-                pkt.coeff[m] ^= gf_mul(a, in->p[s].coeff[m]);
-            }
-            for (t = 0; t < T; t++) {
-                pkt.payload[t] ^= gf_mul(a, in->p[s].payload[t]);
-            }
+            memcpy(coeff_in + (size_t)s * (size_t)M, in->p[s].coeff, (size_t)M);
+            memcpy(payload_in + (size_t)s * (size_t)T, in->p[s].payload, (size_t)T);
         }
-        free(phi_col);
-        if (trace) {
-            print_coeff_payload(send_tag, pkt.batch_id, j, pkt.coeff, pkt.payload, T, "");
+        bats_recode(coeff_in, payload_in, r, T, &recode->s, coeff_out, payload_out, &n_out);
+        for (j = 0; j < n_out; j++) {
+            Packet pkt;
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.batch_id = (uint32_t)batch;
+            memcpy(pkt.coeff, coeff_out + (size_t)j * (size_t)M, (size_t)M);
+            pkt.payload = xmalloc((size_t)T);
+            memcpy(pkt.payload, payload_out + (size_t)j * (size_t)T, (size_t)T);
+            if (trace) {
+                print_coeff_payload(send_tag, pkt.batch_id, j, pkt.coeff, pkt.payload, T, "");
+            }
+            link_send(pkt, next, loss, loss_percent, st, trace, link_name, j, T);
         }
-        link_send(pkt, next, loss, loss_percent, st, trace, link_name, j, T);
+        free(coeff_in);
+        free(payload_in);
+        free(coeff_out);
+        free(payload_out);
     }
     vec_free(in);
 }

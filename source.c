@@ -105,27 +105,21 @@ void source_send(const uint8_t *src, int K, int T, uint64_t code_seed, int batch
             printf("\n");
         }
     }
-    for (j = 0; j < M; j++) {
-        Packet pkt;
-        int t;
-        int a;
-        memset(&pkt, 0, sizeof(pkt));
-        pkt.batch_id = (uint32_t)batch;
-        pkt.coeff[j] = 1; /* I_M 的第 j 列 */
-        pkt.payload = xmalloc((size_t)T);
-        memset(pkt.payload, 0, (size_t)T);
-        for (a = 0; a < plan.d; a++) {
-            uint8_t g = plan.G[(size_t)a * M + (size_t)j];
-            const uint8_t *sp;
-            if (!g) {
-                continue;
-            }
-            sp = src + (size_t)plan.sel[a] * (size_t)T;
-            for (t = 0; t < T; t++) {
-                pkt.payload[t] ^= gf_mul(g, sp[t]);
-            }
+    {
+        uint8_t *coeff = xmalloc((size_t)M * (size_t)M);
+        uint8_t *payload = xmalloc((size_t)M * (size_t)T);
+        bats_encode(src, K, T, code_seed, (uint32_t)batch, coeff, payload);
+        for (j = 0; j < M; j++) {
+            Packet pkt;
+            memset(&pkt, 0, sizeof(pkt));
+            pkt.batch_id = (uint32_t)batch;
+            memcpy(pkt.coeff, coeff + (size_t)j * (size_t)M, (size_t)M);
+            pkt.payload = xmalloc((size_t)T);
+            memcpy(pkt.payload, payload + (size_t)j * (size_t)T, (size_t)T);
+            link_send(pkt, next, loss, loss_percent, st, trace, link_name, j, T);
         }
-        link_send(pkt, next, loss, loss_percent, st, trace, link_name, j, T);
+        free(coeff);
+        free(payload);
     }
     if (verbose && !trace) {
         printf("[源] batch=%d 发出 %d 个包（系数是单位阵的列，细节略）\n", batch, M);

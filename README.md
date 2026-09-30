@@ -27,6 +27,28 @@ The program returns 0 when `recovered.txt` matches the input, and 1 otherwise.
 It also searches for the smallest batch count that recovers `K = 128` and
 prints the per-hop rank histogram.
 
+## Calling from another program
+
+Include `bats_codec.h` only. Link `field.c`, `source.c`, `dest.c`, and `codec.c`
+(`make lib` builds `libbats.a`). Call `bats_init` once.
+
+`bats_encode` writes one batch: `BATS_M` coefficient vectors and `BATS_M`
+payloads, each payload `T` bytes. `bats_recode` mixes packets that already
+share a `batch_id`; pass the same `recode_state` for later batches on that
+hop. `bats_decode` takes a flat list of `BatsSymbol` and groups them by
+`batch_id`. A return value of 1 means all `K` source packets were solved.
+
+```c
+uint8_t coeff[BATS_M * BATS_M];
+uint8_t payload[BATS_M * 32];
+uint64_t recode_state = 1;
+int n_out = 0;
+
+bats_init();
+bats_encode(src, K, 32, code_seed, batch_id, coeff, payload);
+bats_recode(coeff, payload, BATS_M, 32, &recode_state, coeff, payload, &n_out);
+```
+
 ## Files
 
 | File | Role |
@@ -37,4 +59,6 @@ prints the per-hop rank histogram.
 | `sim.c` | Source → relay 1 → relay 2 → destination |
 | `link.c` | In-memory links. Loss happens before enqueue |
 | `field.c` | GF(256) and the batch RNG |
+| `codec.c` | `bats_encode`, `bats_recode`, `bats_decode` |
+| `bats_codec.h` | Header for callers outside this simulator |
 | `main.c` | Self-check, small example, overhead search, file recovery |

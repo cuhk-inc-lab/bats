@@ -23,6 +23,7 @@
  *   sim.c     把上面三个节点串成 源 → 中继1 → 中继2 → 目的
  *   link.c    节点之间的内存链路
  *   field.c   GF(256) 和随机数，三个节点共用
+ *   codec.c   对外的编码、recode、译码（见 bats_codec.h）
  *   main.c    自检、例子、开销测量、文件还原
  *
  * 用法：
@@ -34,13 +35,15 @@
 
 #define _CRT_SECURE_NO_WARNINGS
 
+#include "bats_codec.h"
+
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define M 8
+#define M BATS_M
 #define LOSS_PERCENT 5
 #define FILE_T 32
 
