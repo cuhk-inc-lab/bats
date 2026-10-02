@@ -55,3 +55,19 @@ int link_send(Packet pkt, Vec *dst, Rng *loss, int loss_percent, LinkStat *st,
     vec_push(dst, pkt);
     return 1;
 }
+
+int coeff_rank(const Packet *pkts, int r) {
+    uint8_t *A;
+    int rank;
+    int i;
+    if (r <= 0) {
+        return 0;
+    }
+    A = xmalloc((size_t)r * (size_t)M);
+    for (i = 0; i < r; i++) {
+        memcpy(A + (size_t)i * (size_t)M, pkts[i].coeff, (size_t)M);
+    }
+    rank = coeff_rank_matrix(A, r);
+    free(A);
+    return rank;
+}

@@ -1,5 +1,5 @@
-/* 目的节点：不 recode。先 BP，解不动再 inactivation。 */
-#include "bats.h"
+/* 目的节点：不 recode。先 BP，解不动再 inactivation。从收到的系数建方程。 */
+#include "bats_internal.h"
 
 enum { VAR_UNKNOWN = 0, VAR_INACT = 1, VAR_SOLVED = 2 };
 
@@ -600,6 +600,8 @@ int decode(BatchEq *batches, int n_batches, int K, int T, uint8_t *dst,
                     Var *v = &vars[be->nb[k]];
                     if (v->status != VAR_INACT) {
                         free(coeff);
+                        free(sys.A);
+                        free(sys.rhs);
                         goto done;
                     }
                     coeff[v->inact_id] ^= be->gamma[(size_t)k * (size_t)be->n_recv + (size_t)j];
@@ -699,29 +701,30 @@ int inactivation_self_test(void) {
     return 1;
 }
 
-void eqs_from_packets(BatchEq *eq, const Vec *got, uint64_t code_seed, int batch_id, int K, int T) {
-    int r = got->n;
+void batch_from_received(BatchEq *eq, const uint8_t *coeff, const uint8_t *payload, int n_recv,
+                         uint64_t code_seed, uint32_t batch_id, int K, int T) {
     Plan plan;
     int a;
     int j;
     memset(eq, 0, sizeof(*eq));
     eq->batch_id = batch_id;
-    if (r == 0) {
+    if (n_recv <= 0) {
         return;
     }
-    plan = make_plan(code_seed, (uint32_t)batch_id, K);
-    eq->n_recv = r;
-    eq->Y = xmalloc((size_t)r * (size_t)T);
-    for (j = 0; j < r; j++) {
-        memcpy(eq->Y + (size_t)j * (size_t)T, got->p[j].payload, (size_t)T);
+    plan = make_plan(code_seed, batch_id, K);
+    eq->n_recv = n_recv;
+    eq->Y = xmalloc((size_t)n_recv * (size_t)T);
+    for (j = 0; j < n_recv; j++) {
+        memcpy(eq->Y + (size_t)j * (size_t)T, payload + (size_t)j * (size_t)T, (size_t)T);
     }
     for (a = 0; a < plan.d; a++) {
-        uint8_t *row = xmalloc((size_t)r);
-        for (j = 0; j < r; j++) {
+        uint8_t *row = xmalloc((size_t)n_recv);
+        for (j = 0; j < n_recv; j++) {
             uint8_t acc = 0;
             int m;
+            const uint8_t *cj = coeff + (size_t)j * (size_t)M;
             for (m = 0; m < M; m++) {
-                acc ^= gf_mul(plan.G[(size_t)a * (size_t)M + (size_t)m], got->p[j].coeff[m]);
+                acc ^= gf_mul(plan.G[(size_t)a * (size_t)M + (size_t)m], cj[m]);
             }
             row[j] = acc;
         }
@@ -729,50 +732,4 @@ void eqs_from_packets(BatchEq *eq, const Vec *got, uint64_t code_seed, int batch
         free(row);
     }
     plan_free(&plan);
-}
-
-void dest_collect(BatchEq *eq, Vec *got, uint64_t code_seed, int batch, int K, int T,
-                  int verbose, int trace, int *rank_out) {
-    int r = got->n;
-    Plan plan;
-    int a;
-    int j;
-    eq->batch_id = batch;
-    if (rank_out) {
-        *rank_out = coeff_rank(got->p, r);
-    }
-    if (r == 0) {
-        if (verbose) {
-            printf("[目的] batch=%d 没有收到包\n", batch);
-        }
-        return;
-    }
-    if (verbose) {
-        printf("[目的] batch=%d 收到 %d 个，不再乘随机系数\n", batch, r);
-    }
-    plan = make_plan(code_seed, (uint32_t)batch, K);
-    eq->n_recv = r;
-    eq->Y = xmalloc((size_t)r * (size_t)T);
-    for (j = 0; j < r; j++) {
-        memcpy(eq->Y + (size_t)j * (size_t)T, got->p[j].payload, (size_t)T);
-        if (trace) {
-            print_coeff_payload("    [目的] 收到", got->p[j].batch_id, j,
-                                got->p[j].coeff, got->p[j].payload, T, "");
-        }
-    }
-    for (a = 0; a < plan.d; a++) {
-        uint8_t *row = xmalloc((size_t)r);
-        for (j = 0; j < r; j++) {
-            uint8_t acc = 0;
-            int m;
-            for (m = 0; m < M; m++) {
-                acc ^= gf_mul(plan.G[(size_t)a * M + (size_t)m], got->p[j].coeff[m]);
-            }
-            row[j] = acc;
-        }
-        batch_push_row(eq, plan.sel[a], row);
-        free(row);
-    }
-    plan_free(&plan);
-    vec_free(got);
 }

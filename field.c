@@ -1,5 +1,5 @@
 /* GF(256)、随机数，以及系数矩阵的行约化。源、中继、目的都用。 */
-#include "bats.h"
+#include "bats_internal.h"
 
 static uint8_t gf_exp[512];
 static uint8_t gf_log[256];
@@ -171,21 +171,12 @@ int row_reduce(const uint8_t *A, int nU, int nR, int *col_of_pivot, uint8_t *Inv
     return rank;
 }
 
-/* 收到的系数向量排成 r×M，秩就是这一跳该 batch 的 transfer 秩。整批丢失为 0。 */
-int coeff_rank(const Packet *pkts, int r) {
-    uint8_t *A;
-    int rank;
-    int i;
-    if (r <= 0) {
+/* 行主序的 rows×M 系数矩阵。整批丢失（rows<=0）为 0。 */
+int coeff_rank_matrix(const uint8_t *coeff, int rows) {
+    if (rows <= 0 || coeff == NULL) {
         return 0;
     }
-    A = xmalloc((size_t)r * (size_t)M);
-    for (i = 0; i < r; i++) {
-        memcpy(A + (size_t)i * (size_t)M, pkts[i].coeff, (size_t)M);
-    }
-    rank = row_reduce(A, r, M, NULL, NULL);
-    free(A);
-    return rank;
+    return row_reduce(coeff, rows, M, NULL, NULL);
 }
 
 int gf_self_test(void) {

@@ -1,18 +1,12 @@
 /* 编码、recode、译码。仿真和外部程序都走这里。 */
-#include "bats.h"
+#include "bats_internal.h"
 
 void bats_init(void) {
     gf_init();
 }
 
-int bats_encode(const uint8_t *src, int K, int T, uint64_t code_seed, uint32_t batch_id,
-                uint8_t *coeff, uint8_t *payload) {
-    Plan plan;
+void encode_from_plan(const uint8_t *src, int T, const Plan *plan, uint8_t *coeff, uint8_t *payload) {
     int j;
-    if (K < 1 || T < 1 || src == NULL || coeff == NULL || payload == NULL) {
-        return -1;
-    }
-    plan = make_plan(code_seed, batch_id, K);
     for (j = 0; j < M; j++) {
         int t;
         int a;
@@ -21,18 +15,28 @@ int bats_encode(const uint8_t *src, int K, int T, uint64_t code_seed, uint32_t b
         memset(cj, 0, (size_t)M);
         cj[j] = 1; /* I_M 的第 j 列 */
         memset(pj, 0, (size_t)T);
-        for (a = 0; a < plan.d; a++) {
-            uint8_t g = plan.G[(size_t)a * (size_t)M + (size_t)j];
+        for (a = 0; a < plan->d; a++) {
+            uint8_t g = plan->G[(size_t)a * (size_t)M + (size_t)j];
             const uint8_t *sp;
             if (!g) {
                 continue;
             }
-            sp = src + (size_t)plan.sel[a] * (size_t)T;
+            sp = src + (size_t)plan->sel[a] * (size_t)T;
             for (t = 0; t < T; t++) {
                 pj[t] ^= gf_mul(g, sp[t]);
             }
         }
     }
+}
+
+int bats_encode(const uint8_t *src, int K, int T, uint64_t code_seed, uint32_t batch_id,
+                uint8_t *coeff, uint8_t *payload) {
+    Plan plan;
+    if (K < 1 || T < 1 || src == NULL || coeff == NULL || payload == NULL) {
+        return -1;
+    }
+    plan = make_plan(code_seed, batch_id, K);
+    encode_from_plan(src, T, &plan, coeff, payload);
     plan_free(&plan);
     return 0;
 }
@@ -43,6 +47,7 @@ int bats_recode(const uint8_t *coeff_in, const uint8_t *payload_in, int n_in, in
     Rng recode;
     uint8_t *coeff_tmp;
     uint8_t *payload_tmp;
+    uint8_t *phi_col;
     int j;
     if (n_out) {
         *n_out = 0;
@@ -59,10 +64,10 @@ int bats_recode(const uint8_t *coeff_in, const uint8_t *payload_in, int n_in, in
     recode.s = *recode_state;
     coeff_tmp = xmalloc((size_t)M * (size_t)M);
     payload_tmp = xmalloc((size_t)M * (size_t)T);
+    phi_col = xmalloc((size_t)n_in);
     for (j = 0; j < M; j++) {
         int nz = 0;
         int s;
-        uint8_t *phi_col = xmalloc((size_t)n_in);
         uint8_t *cj = coeff_tmp + (size_t)j * (size_t)M;
         uint8_t *pj = payload_tmp + (size_t)j * (size_t)T;
         memset(cj, 0, (size_t)M);
@@ -94,8 +99,8 @@ int bats_recode(const uint8_t *coeff_in, const uint8_t *payload_in, int n_in, in
                 pj[t] ^= gf_mul(a, ps[t]);
             }
         }
-        free(phi_col);
     }
+    free(phi_col);
     memcpy(coeff_out, coeff_tmp, (size_t)M * (size_t)M);
     memcpy(payload_out, payload_tmp, (size_t)M * (size_t)T);
     free(coeff_tmp);
@@ -169,27 +174,21 @@ int bats_decode(const BatsSymbol *symbols, int n_symbols, int K, int T, uint64_t
     eqs = xmalloc((size_t)n_batches * sizeof(BatchEq));
     memset(eqs, 0, (size_t)n_batches * sizeof(BatchEq));
     for (i = 0; i < n_batches; i++) {
-        Vec got;
+        uint8_t *coeff = xmalloc((size_t)counts[i] * (size_t)M);
+        uint8_t *payload = xmalloc((size_t)counts[i] * (size_t)T);
         int filled = 0;
         int s;
-        memset(&got, 0, sizeof(got));
-        got.p = xmalloc((size_t)counts[i] * sizeof(Packet));
-        got.n = counts[i];
-        got.cap = counts[i];
         for (s = 0; s < n_symbols; s++) {
-            Packet *pkt;
             if (symbols[s].batch_id != ids[i]) {
                 continue;
             }
-            pkt = &got.p[filled++];
-            memset(pkt, 0, sizeof(*pkt));
-            pkt->batch_id = ids[i];
-            memcpy(pkt->coeff, symbols[s].coeff, (size_t)M);
-            pkt->payload = xmalloc((size_t)T);
-            memcpy(pkt->payload, symbols[s].payload, (size_t)T);
+            memcpy(coeff + (size_t)filled * (size_t)M, symbols[s].coeff, (size_t)M);
+            memcpy(payload + (size_t)filled * (size_t)T, symbols[s].payload, (size_t)T);
+            filled++;
         }
-        eqs_from_packets(&eqs[i], &got, code_seed, (int)ids[i], K, T);
-        vec_free(&got);
+        batch_from_received(&eqs[i], coeff, payload, filled, code_seed, ids[i], K, T);
+        free(coeff);
+        free(payload);
     }
     ok = decode(eqs, n_batches, K, T, dst, n_bp, n_inact);
     for (i = 0; i < n_batches; i++) {

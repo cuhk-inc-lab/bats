@@ -106,3 +106,157 @@ SimResult simulate(const uint8_t *src, int K, int T, uint64_t code_seed,
     return simulate_ex(src, K, T, code_seed, loss_seed, recode_seed, loss_percent,
                        n_batches, verbose, trace_batch, dst, NULL, NULL, NULL, NULL);
 }
+
+void source_send(const uint8_t *src, int K, int T, uint64_t code_seed, int batch,
+                 Vec *next, Rng *loss, int loss_percent, LinkStat *st,
+                 int verbose, int trace, const char *link_name) {
+    Plan plan = make_plan(code_seed, (uint32_t)batch, K);
+    uint8_t *coeff = xmalloc((size_t)M * (size_t)M);
+    uint8_t *payload = xmalloc((size_t)M * (size_t)T);
+    int j;
+    if (trace) {
+        int a;
+        int m;
+        printf("[源] batch=%d 只是箱子编号  d=%d 选中源包", batch, plan.d);
+        for (a = 0; a < plan.d; a++) {
+            printf(" %d", plan.sel[a]);
+        }
+        printf("\n[源] batch=%d 的 G（%d×%d）不放进包，目的端用同一种子复原\n",
+               batch, plan.d, M);
+        for (a = 0; a < plan.d; a++) {
+            printf("    对应源包 %d:", plan.sel[a]);
+            for (m = 0; m < M; m++) {
+                printf(" %02X", plan.G[(size_t)a * M + (size_t)m]);
+            }
+            printf("\n");
+        }
+    }
+    encode_from_plan(src, T, &plan, coeff, payload);
+    for (j = 0; j < M; j++) {
+        Packet pkt;
+        memset(&pkt, 0, sizeof(pkt));
+        pkt.batch_id = (uint32_t)batch;
+        memcpy(pkt.coeff, coeff + (size_t)j * (size_t)M, (size_t)M);
+        pkt.payload = xmalloc((size_t)T);
+        memcpy(pkt.payload, payload + (size_t)j * (size_t)T, (size_t)T);
+        link_send(pkt, next, loss, loss_percent, st, trace, link_name, j, T);
+    }
+    free(coeff);
+    free(payload);
+    if (verbose && !trace) {
+        printf("[源] batch=%d 发出 %d 个包（系数是单位阵的列，细节略）\n", batch, M);
+    }
+    plan_free(&plan);
+}
+
+void eqs_from_packets(BatchEq *eq, const Vec *got, uint64_t code_seed, uint32_t batch_id, int K,
+                      int T) {
+    int r = got->n;
+    uint8_t *coeff = NULL;
+    uint8_t *payload = NULL;
+    int j;
+    if (r > 0) {
+        coeff = xmalloc((size_t)r * (size_t)M);
+        payload = xmalloc((size_t)r * (size_t)T);
+        for (j = 0; j < r; j++) {
+            memcpy(coeff + (size_t)j * (size_t)M, got->p[j].coeff, (size_t)M);
+            memcpy(payload + (size_t)j * (size_t)T, got->p[j].payload, (size_t)T);
+        }
+    }
+    batch_from_received(eq, coeff, payload, r, code_seed, batch_id, K, T);
+    free(coeff);
+    free(payload);
+}
+
+void dest_collect(BatchEq *eq, Vec *got, uint64_t code_seed, uint32_t batch, int K, int T,
+                  int verbose, int trace, int *rank_out) {
+    int r = got->n;
+    int j;
+    if (rank_out) {
+        *rank_out = coeff_rank(got->p, r);
+    }
+    if (r == 0) {
+        memset(eq, 0, sizeof(*eq));
+        eq->batch_id = batch;
+        if (verbose) {
+            printf("[目的] batch=%u 没有收到包\n", batch);
+        }
+        return;
+    }
+    if (verbose) {
+        printf("[目的] batch=%u 收到 %d 个，不再乘随机系数\n", batch, r);
+    }
+    if (trace) {
+        for (j = 0; j < r; j++) {
+            print_coeff_payload("    [目的] 收到", got->p[j].batch_id, j, got->p[j].coeff,
+                                got->p[j].payload, T, "");
+        }
+    }
+    eqs_from_packets(eq, got, code_seed, batch, K, T);
+    vec_free(got);
+}
+
+int batches_needed(int K) {
+    enum { N_HOPS = 3, LN2_MILLI = 693, COVER_SLACK_MILLI = 9000 };
+    enum { CUSTOM_BATCH_FACTOR = 6, CUSTOM_BATCH_FLOOR = 32 };
+    int log2 = 0;
+    int x = K;
+    int hop;
+    int keep;
+    long long deg_sum;
+    long long weight_sum;
+    long long num;
+    long long den;
+    long long recv;
+    long long percent_scale;
+    int n_cover;
+    int n_info;
+    int n;
+    if (K < 1) {
+        return 1;
+    }
+    while (x > 1) {
+        x >>= 1;
+        log2++;
+    }
+    weight_sum = psi_weight_sum();
+    deg_sum = psi_degree_moment();
+    if (deg_sum < 1) {
+        deg_sum = 1;
+    }
+    /* ceil((ln(K)+9) * K / 平均度数)。ln(K) 用 (floor(log2(K))+1)*ln(2) 上界。 */
+    num = ((long long)(log2 + 1) * LN2_MILLI + COVER_SLACK_MILLI) * (long long)K * weight_sum;
+    den = 1000LL * deg_sum;
+    n_cover = (int)((num + den - 1) / den);
+    /* 三跳之后每批大约还剩 M*((100-丢包)/100)^3 个包，信息量上界再留一倍。 */
+    keep = 100 - LOSS_PERCENT;
+    if (keep < 1) {
+        keep = 1;
+    }
+    recv = M;
+    percent_scale = 1;
+    for (hop = 0; hop < N_HOPS; hop++) {
+        recv *= keep;
+        percent_scale *= 100;
+    }
+    num = 2LL * (long long)K * percent_scale;
+    n_info = (int)((num + recv - 1) / recv);
+    n = n_cover > n_info ? n_cover : n_info;
+    if (n < n_info * 2) {
+        n = n_info * 2;
+    }
+    /* 有限 K 比上面的渐近上界费 batch。自定义 Ψ 把搜索上界放到 6K。 */
+    if (psi_is_custom()) {
+        int wide = CUSTOM_BATCH_FACTOR * K;
+        if (wide < CUSTOM_BATCH_FLOOR) {
+            wide = CUSTOM_BATCH_FLOOR;
+        }
+        if (n < wide) {
+            n = wide;
+        }
+    }
+    if (n < 1) {
+        n = 1;
+    }
+    return n;
+}

@@ -27,10 +27,27 @@ The program returns 0 when `recovered.txt` matches the input, and 1 otherwise.
 It also searches for the smallest batch count that recovers `K = 128` and
 prints the per-hop rank histogram.
 
+By default the degree distribution stays the built-in one. `--optimize` keeps
+the destination rank counts from the `K = 128` measurement even when that
+run cannot recover, solves (P1) with maximum degree 128, and measures again.
+File recovery then solves another distribution capped at that file's own
+packet count, and leaves `psi.txt` as the `K = 128` result. `--psi` uses a
+weight file instead. Pass one of those options, not both.
+
+```bash
+./bats_sim input.txt recovered.txt
+./bats_sim --optimize input.txt recovered.txt
+./bats_sim --psi psi.txt input.txt recovered.txt
+```
+
+`psi_opt` is the same optimizer as a separate program, if you already have
+rank counts and want to write a weight file yourself.
+
 ## Calling from another program
 
 Include `bats_codec.h` only. Link `field.c`, `source.c`, `dest.c`, and `codec.c`
-(`make lib` builds `libbats.a`). Call `bats_init` once.
+(`make lib` builds `libbats.a`). Those four files are the codec. The line
+network stays in `link.c`, `relay.c`, `sim.c`, and `main.c`. Call `bats_init` once.
 
 `bats_encode` writes one batch: `BATS_M` coefficient vectors and `BATS_M`
 payloads, each payload `T` bytes. `bats_recode` mixes packets that already
@@ -53,10 +70,10 @@ bats_recode(coeff, payload, BATS_M, 32, &recode_state, coeff, payload, &n_out);
 
 | File | Role |
 | --- | --- |
-| `source.c` | Source: sample a degree, build `G`, emit `M` packets |
+| `source.c` | Degree distribution and `G` |
 | `relay.c` | Relay: recode one batch. Relay 1 and relay 2 share this code |
-| `dest.c` | Destination: belief propagation, then inactivation |
-| `sim.c` | Source → relay 1 → relay 2 → destination |
+| `dest.c` | Build batch equations, belief propagation, then inactivation |
+| `sim.c` | Send each batch, then source → relay 1 → relay 2 → destination |
 | `link.c` | In-memory links. Loss happens before enqueue |
 | `field.c` | GF(256) and the batch RNG |
 | `codec.c` | `bats_encode`, `bats_recode`, `bats_decode` |
