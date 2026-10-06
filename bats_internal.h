@@ -21,7 +21,6 @@ void *xmalloc(size_t n);
 void *xrealloc(void *p, size_t n);
 
 void gf_init(void);
-uint8_t gf_mul(uint8_t a, uint8_t b);
 uint8_t gf_inv(uint8_t a);
 int gf_self_test(void);
 
@@ -39,10 +38,21 @@ uint32_t rng_below(Rng *r, uint32_t n);
 uint8_t rng_byte(Rng *r);
 Rng rng_for_batch(uint64_t seed, uint32_t batch_id);
 
+extern uint8_t gf_mul_tab[256 * 256];
+
+static inline uint8_t gf_mul(uint8_t a, uint8_t b)
+{
+    return gf_mul_tab[((unsigned)a << 8) | b];
+}
+
+/* dst[i] ^= a * src[i]。a 为 0 时不变。载荷长循环会走 SSSE3。 */
+void gf_axpy(uint8_t *dst, const uint8_t *src, uint8_t a, size_t n);
+
 typedef struct {
     int d;
     int *sel;
     uint8_t *G; /* d 行 M 列，行主序 */
+    int heap;   /* 1 表示 sel/G 要 free */
 } Plan;
 
 Plan make_plan(uint64_t seed, uint32_t batch_id, int K);

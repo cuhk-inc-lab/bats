@@ -149,37 +149,53 @@ static void var_add_dep(Var *v, int id, uint8_t c) {
     v->dep_n++;
 }
 
+static uint8_t *small_buf(uint8_t *stack, int stack_n, int n, int *heap)
+{
+    if (n <= stack_n) {
+        *heap = 0;
+        return stack;
+    }
+    *heap = 1;
+    return xmalloc((size_t)n);
+}
+
 static void eliminate_var(BatchEq *b, int var, Var *v, int T) {
     int k = batch_find(b, var);
     int nR;
+    uint8_t row_stack[64];
     uint8_t *row;
+    int row_heap = 0;
     int j;
     int di;
     if (k < 0) {
         return;
     }
     nR = b->n_recv;
-    row = xmalloc((size_t)nR);
+    row = small_buf(row_stack, (int)sizeof(row_stack), nR, &row_heap);
     memcpy(row, b->gamma + (size_t)k * (size_t)nR, (size_t)nR);
     batch_remove_row(b, k);
     for (j = 0; j < nR; j++) {
-        int t;
         if (!row[j]) {
             continue;
         }
-        for (t = 0; t < T; t++) {
-            b->Y[(size_t)j * (size_t)T + (size_t)t] ^= gf_mul(row[j], v->cons[t]);
-        }
+        gf_axpy(b->Y + (size_t)j * (size_t)T, v->cons, row[j], (size_t)T);
     }
     for (di = 0; di < v->dep_n; di++) {
-        uint8_t *delta = xmalloc((size_t)nR);
+        uint8_t delta_stack[64];
+        uint8_t *delta;
+        int delta_heap = 0;
+        delta = small_buf(delta_stack, (int)sizeof(delta_stack), nR, &delta_heap);
         for (j = 0; j < nR; j++) {
             delta[j] = gf_mul(row[j], v->dep_c[di]);
         }
         batch_accumulate(b, v->dep_id[di], delta);
-        free(delta);
+        if (delta_heap) {
+            free(delta);
+        }
     }
-    free(row);
+    if (row_heap) {
+        free(row);
+    }
 }
 
 static int try_solve_batch(BatchEq *b, Var *vars, int T, BatchEq *all, int n_batches) {
@@ -199,15 +215,28 @@ static int try_solve_batch(BatchEq *b, Var *vars, int T, BatchEq *all, int n_bat
         return 0;
     }
     strip_zero_rows(b);
-    U = xmalloc((size_t)(b->n_nb > 0 ? b->n_nb : 1) * sizeof(int));
-    for (k = 0; k < b->n_nb; k++) {
-        if (vars[b->nb[k]].status == VAR_UNKNOWN) {
-            U[nU++] = k;
+    {
+        int U_stack[256];
+        int U_heap = 0;
+        U = (int *)small_buf((uint8_t *)U_stack, (int)sizeof(U_stack),
+                             (b->n_nb > 0 ? b->n_nb : 1) * (int)sizeof(int), &U_heap);
+        for (k = 0; k < b->n_nb; k++) {
+            if (vars[b->nb[k]].status == VAR_UNKNOWN) {
+                U[nU++] = k;
+            }
         }
-    }
-    if (nU == 0) {
-        free(U);
-        return 0;
+        /* 秩不超过已收包数。未知邻居更多时这一步必然失败，不用做消元。 */
+        if (nU == 0 || nU > nR) {
+            if (U_heap) {
+                free(U);
+            }
+            return 0;
+        }
+        if (!U_heap) {
+            int *copy = xmalloc((size_t)nU * sizeof(int));
+            memcpy(copy, U, (size_t)nU * sizeof(int));
+            U = copy;
+        }
     }
     A = xmalloc((size_t)nU * (size_t)nR);
     for (u = 0; u < nU; u++) {
@@ -236,13 +265,10 @@ static int try_solve_batch(BatchEq *b, Var *vars, int T, BatchEq *all, int n_bat
         for (i = 0; i < nU; i++) {
             uint8_t coef = Inv[(size_t)i * (size_t)nU + (size_t)u];
             int col = piv[i];
-            int t;
             if (!coef) {
                 continue;
             }
-            for (t = 0; t < T; t++) {
-                sv->cons[t] ^= gf_mul(coef, b->Y[(size_t)col * (size_t)T + (size_t)t]);
-            }
+            gf_axpy(sv->cons, b->Y + (size_t)col * (size_t)T, coef, (size_t)T);
         }
         for (k = 0; k < b->n_nb; k++) {
             int is_u = 0;
@@ -265,7 +291,9 @@ static int try_solve_batch(BatchEq *b, Var *vars, int T, BatchEq *all, int n_bat
                 uint8_t coef = Inv[(size_t)i * (size_t)nU + (size_t)u];
                 alpha ^= gf_mul(coef, b->gamma[(size_t)k * (size_t)nR + (size_t)col]);
             }
-            var_add_dep(sv, vars[b->nb[k]].inact_id, alpha);
+            /* 记下源包下标。消去时要按源包下标把依赖加回 batch，
+               不能用 inact_id，否则会和另一个源包的下标撞上。 */
+            var_add_dep(sv, b->nb[k], alpha);
         }
         solved_n++;
     }
@@ -489,10 +517,7 @@ static int solve_dense(uint8_t *A, uint8_t *rhs, int n_eq, int nvar, int T, uint
                 A[(size_t)i * (size_t)nvar + (size_t)c] ^=
                     gf_mul(f, A[(size_t)row * (size_t)nvar + (size_t)c]);
             }
-            for (c = 0; c < T; c++) {
-                rhs[(size_t)i * (size_t)T + (size_t)c] ^=
-                    gf_mul(f, rhs[(size_t)row * (size_t)T + (size_t)c]);
-            }
+            gf_axpy(rhs + (size_t)i * (size_t)T, rhs + (size_t)row * (size_t)T, f, (size_t)T);
         }
         where[col] = row;
         row++;
@@ -626,18 +651,16 @@ int decode(BatchEq *batches, int n_batches, int K, int T, uint8_t *dst,
         free(sys.rhs);
     }
     for (i = 0; i < K; i++) {
-        int t;
         int di;
         if (vars[i].status == VAR_INACT) {
             memcpy(dst + (size_t)i * (size_t)T,
                    inact_val + (size_t)vars[i].inact_id * (size_t)T, (size_t)T);
         } else if (vars[i].status == VAR_SOLVED) {
             for (di = 0; di < vars[i].dep_n; di++) {
-                int id = vars[i].dep_id[di];
+                int src = vars[i].dep_id[di];
+                int id = vars[src].inact_id;
                 uint8_t c = vars[i].dep_c[di];
-                for (t = 0; t < T; t++) {
-                    vars[i].cons[t] ^= gf_mul(c, inact_val[(size_t)id * (size_t)T + (size_t)t]);
-                }
+                gf_axpy(vars[i].cons, inact_val + (size_t)id * (size_t)T, c, (size_t)T);
             }
             memcpy(dst + (size_t)i * (size_t)T, vars[i].cons, (size_t)T);
         } else {
@@ -717,19 +740,26 @@ void batch_from_received(BatchEq *eq, const uint8_t *coeff, const uint8_t *paylo
     for (j = 0; j < n_recv; j++) {
         memcpy(eq->Y + (size_t)j * (size_t)T, payload + (size_t)j * (size_t)T, (size_t)T);
     }
-    for (a = 0; a < plan.d; a++) {
-        uint8_t *row = xmalloc((size_t)n_recv);
-        for (j = 0; j < n_recv; j++) {
-            uint8_t acc = 0;
-            int m;
-            const uint8_t *cj = coeff + (size_t)j * (size_t)M;
-            for (m = 0; m < M; m++) {
-                acc ^= gf_mul(plan.G[(size_t)a * (size_t)M + (size_t)m], cj[m]);
+    {
+        uint8_t row_stack[64];
+        uint8_t *row;
+        int row_heap = 0;
+        row = small_buf(row_stack, (int)sizeof(row_stack), n_recv, &row_heap);
+        for (a = 0; a < plan.d; a++) {
+            for (j = 0; j < n_recv; j++) {
+                uint8_t acc = 0;
+                int m;
+                const uint8_t *cj = coeff + (size_t)j * (size_t)M;
+                for (m = 0; m < M; m++) {
+                    acc ^= gf_mul(plan.G[(size_t)a * (size_t)M + (size_t)m], cj[m]);
+                }
+                row[j] = acc;
             }
-            row[j] = acc;
+            batch_push_row(eq, plan.sel[a], row);
         }
-        batch_push_row(eq, plan.sel[a], row);
-        free(row);
+        if (row_heap) {
+            free(row);
+        }
     }
     plan_free(&plan);
 }

@@ -8,7 +8,6 @@ void bats_init(void) {
 void encode_from_plan(const uint8_t *src, int T, const Plan *plan, uint8_t *coeff, uint8_t *payload) {
     int j;
     for (j = 0; j < M; j++) {
-        int t;
         int a;
         uint8_t *cj = coeff + (size_t)j * (size_t)M;
         uint8_t *pj = payload + (size_t)j * (size_t)T;
@@ -22,9 +21,7 @@ void encode_from_plan(const uint8_t *src, int T, const Plan *plan, uint8_t *coef
                 continue;
             }
             sp = src + (size_t)plan->sel[a] * (size_t)T;
-            for (t = 0; t < T; t++) {
-                pj[t] ^= gf_mul(g, sp[t]);
-            }
+            gf_axpy(pj, sp, g, (size_t)T);
         }
     }
 }
@@ -45,9 +42,13 @@ int bats_recode(const uint8_t *coeff_in, const uint8_t *payload_in, int n_in, in
                 uint64_t *recode_state, uint8_t *coeff_out, uint8_t *payload_out,
                 int *n_out) {
     Rng recode;
+    uint8_t coeff_stack[M * M];
+    uint8_t payload_stack[M * 2048];
+    uint8_t phi_stack[128];
     uint8_t *coeff_tmp;
     uint8_t *payload_tmp;
     uint8_t *phi_col;
+    int use_heap;
     int j;
     if (n_out) {
         *n_out = 0;
@@ -62,9 +63,16 @@ int bats_recode(const uint8_t *coeff_in, const uint8_t *payload_in, int n_in, in
         return -1;
     }
     recode.s = *recode_state;
-    coeff_tmp = xmalloc((size_t)M * (size_t)M);
-    payload_tmp = xmalloc((size_t)M * (size_t)T);
-    phi_col = xmalloc((size_t)n_in);
+    use_heap = (T > 2048 || n_in > 128);
+    if (use_heap) {
+        coeff_tmp = xmalloc((size_t)M * (size_t)M);
+        payload_tmp = xmalloc((size_t)M * (size_t)T);
+        phi_col = xmalloc((size_t)n_in);
+    } else {
+        coeff_tmp = coeff_stack;
+        payload_tmp = payload_stack;
+        phi_col = phi_stack;
+    }
     for (j = 0; j < M; j++) {
         int nz = 0;
         int s;
@@ -84,7 +92,6 @@ int bats_recode(const uint8_t *coeff_in, const uint8_t *payload_in, int n_in, in
         for (s = 0; s < n_in; s++) {
             uint8_t a = phi_col[s];
             int m;
-            int t;
             const uint8_t *cs;
             const uint8_t *ps;
             if (!a) {
@@ -95,16 +102,16 @@ int bats_recode(const uint8_t *coeff_in, const uint8_t *payload_in, int n_in, in
             for (m = 0; m < M; m++) {
                 cj[m] ^= gf_mul(a, cs[m]);
             }
-            for (t = 0; t < T; t++) {
-                pj[t] ^= gf_mul(a, ps[t]);
-            }
+            gf_axpy(pj, ps, a, (size_t)T);
         }
     }
-    free(phi_col);
     memcpy(coeff_out, coeff_tmp, (size_t)M * (size_t)M);
     memcpy(payload_out, payload_tmp, (size_t)M * (size_t)T);
-    free(coeff_tmp);
-    free(payload_tmp);
+    if (use_heap) {
+        free(phi_col);
+        free(coeff_tmp);
+        free(payload_tmp);
+    }
     *recode_state = recode.s;
     if (n_out) {
         *n_out = M;

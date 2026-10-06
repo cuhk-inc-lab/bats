@@ -171,19 +171,36 @@ static int sample_degree(Rng *rng) {
     return psi_deg_max;
 }
 
+/* 线上 Ψ 的度数会超过 32。缓冲放到线程本地，避免每个 batch 都 malloc。 */
+enum { PLAN_D = 512, PLAN_K = 512 };
+static _Thread_local int plan_tls_busy;
+static _Thread_local int plan_tls_sel[PLAN_D];
+static _Thread_local uint8_t plan_tls_G[PLAN_D * M];
+static _Thread_local int plan_tls_pool[PLAN_K];
+
 Plan make_plan(uint64_t seed, uint32_t batch_id, int K) {
     Plan plan;
     Rng rng = rng_for_batch(seed, batch_id);
     int d = sample_degree(&rng);
     int *pool;
     int i;
+    memset(&plan, 0, sizeof(plan));
     if (d > K) {
         d = K;
     }
     plan.d = d;
-    plan.sel = xmalloc((size_t)d * sizeof(int));
-    plan.G = xmalloc((size_t)d * (size_t)M);
-    pool = xmalloc((size_t)K * sizeof(int));
+    if (d <= PLAN_D && K <= PLAN_K && !plan_tls_busy) {
+        plan.sel = plan_tls_sel;
+        plan.G = plan_tls_G;
+        pool = plan_tls_pool;
+        plan.heap = 0;
+        plan_tls_busy = 1;
+    } else {
+        plan.sel = xmalloc((size_t)d * sizeof(int));
+        plan.G = xmalloc((size_t)d * (size_t)M);
+        pool = xmalloc((size_t)K * sizeof(int));
+        plan.heap = 1;
+    }
     for (i = 0; i < K; i++) {
         pool[i] = i;
     }
@@ -197,15 +214,22 @@ Plan make_plan(uint64_t seed, uint32_t batch_id, int K) {
     for (i = 0; i < d * M; i++) {
         plan.G[i] = rng_byte(&rng);
     }
-    free(pool);
+    if (plan.heap) {
+        free(pool);
+    }
     return plan;
 }
 
 void plan_free(Plan *plan) {
-    free(plan->sel);
-    free(plan->G);
+    if (plan->heap) {
+        free(plan->sel);
+        free(plan->G);
+    } else {
+        plan_tls_busy = 0;
+    }
     plan->sel = NULL;
     plan->G = NULL;
+    plan->heap = 0;
 }
 
 void psi_reset(void) {

@@ -31,6 +31,9 @@ typedef struct {
 
 void bats_init(void);
 
+/* weights[1..max_degree] 是整数权重，weights[0] 不用。成功返回 1。 */
+int psi_set(const int *weights, int max_degree);
+
 /* 写出 BATS_M 个包。成功返回 0，参数不合法返回 -1。 */
 int bats_encode(const uint8_t *src, int K, int T, uint64_t code_seed, uint32_t batch_id,
                 uint8_t *coeff, uint8_t *payload);

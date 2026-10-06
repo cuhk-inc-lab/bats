@@ -1,8 +1,125 @@
-/* GF(256)、随机数，以及系数矩阵的行约化。源、中继、目的都用。 */
 #include "bats_internal.h"
+
+#include <cpuid.h>
+#include <tmmintrin.h>
+
+static int cpu_ssse3;
+
+static int cpu_has_ssse3(void)
+{
+    unsigned int a;
+    unsigned int b;
+    unsigned int c;
+    unsigned int d;
+
+    if (!__get_cpuid(1, &a, &b, &c, &d)) {
+        return 0;
+    }
+    return (c & bit_SSSE3) != 0;
+}
+
+static void gf_axpy_scalar(uint8_t *dst, const uint8_t *src, uint8_t a, size_t n)
+{
+    size_t i;
+
+    if (a == 0) {
+        return;
+    }
+    for (i = 0; i < n; i++) {
+        dst[i] ^= gf_mul(a, src[i]);
+    }
+}
+
+__attribute__((target("ssse3"))) static void gf_axpy_ssse3(uint8_t *dst, const uint8_t *src,
+                                                           uint8_t a, size_t n)
+{
+    uint8_t lo_b[16];
+    uint8_t hi_b[16];
+    __m128i tab_lo;
+    __m128i tab_hi;
+    __m128i mask;
+    size_t i;
+    int k;
+
+    if (a == 0 || n == 0) {
+        return;
+    }
+    for (k = 0; k < 16; k++) {
+        lo_b[k] = gf_mul_tab[((unsigned)a << 8) | (unsigned)k];
+        hi_b[k] = gf_mul_tab[((unsigned)a << 8) | ((unsigned)k << 4)];
+    }
+    tab_lo = _mm_loadu_si128((const __m128i *)lo_b);
+    tab_hi = _mm_loadu_si128((const __m128i *)hi_b);
+    mask = _mm_set1_epi8(0x0f);
+    for (i = 0; i + 16 <= n; i += 16) {
+        __m128i x = _mm_loadu_si128((const __m128i *)(src + i));
+        __m128i lo = _mm_shuffle_epi8(tab_lo, _mm_and_si128(x, mask));
+        __m128i hi_n = _mm_and_si128(_mm_srli_epi16(x, 4), mask);
+        __m128i hi = _mm_shuffle_epi8(tab_hi, hi_n);
+        __m128i y = _mm_xor_si128(lo, hi);
+        __m128i d = _mm_loadu_si128((const __m128i *)(dst + i));
+
+        _mm_storeu_si128((__m128i *)(dst + i), _mm_xor_si128(d, y));
+    }
+    gf_axpy_scalar(dst + i, src + i, a, n - i);
+}
+
+static int gf_axpy_self_test(void)
+{
+    uint8_t src[64];
+    uint8_t got[64];
+    uint8_t expect[64];
+    int a;
+    int i;
+
+    for (i = 0; i < 64; i++) {
+        src[i] = (uint8_t)(i * 17 + 3);
+    }
+    for (a = 0; a < 256; a++) {
+        memset(got, 0x5a, 20);
+        memset(expect, 0x5a, 20);
+        gf_axpy_scalar(expect, src, (uint8_t)a, 20);
+        gf_axpy_ssse3(got, src, (uint8_t)a, 20);
+        if (memcmp(got, expect, 20) != 0) {
+            return -1;
+        }
+        memset(got, 0x11, sizeof(got));
+        memset(expect, 0x11, sizeof(expect));
+        gf_axpy_scalar(expect, src, (uint8_t)a, sizeof(src));
+        gf_axpy_ssse3(got, src, (uint8_t)a, sizeof(src));
+        if (memcmp(got, expect, sizeof(got)) != 0) {
+            return -1;
+        }
+    }
+    return 0;
+}
+
+static void gf_axpy_init(void)
+{
+    cpu_ssse3 = cpu_has_ssse3();
+    if (cpu_ssse3 && gf_axpy_self_test() != 0) {
+        fprintf(stderr, "gf_axpy ssse3 自检失败\n");
+        exit(1);
+    }
+}
+
+void gf_axpy(uint8_t *dst, const uint8_t *src, uint8_t a, size_t n)
+{
+    if (a == 0 || n == 0) {
+        return;
+    }
+    if (cpu_ssse3) {
+        gf_axpy_ssse3(dst, src, a, n);
+        return;
+    }
+    gf_axpy_scalar(dst, src, a, n);
+}
+
+/* GF(256)、随机数，以及系数矩阵的行约化。源、中继、目的都用。 */
 
 static uint8_t gf_exp[512];
 static uint8_t gf_log[256];
+uint8_t gf_mul_tab[256 * 256];
 
 void *xmalloc(size_t n) {
     void *p = malloc(n ? n : 1);
@@ -35,13 +152,16 @@ void gf_init(void) {
     for (int i = 255; i < 512; i++) {
         gf_exp[i] = gf_exp[i - 255];
     }
-}
-
-uint8_t gf_mul(uint8_t a, uint8_t b) {
-    if (a == 0 || b == 0) {
-        return 0;
+    for (int a = 0; a < 256; a++) {
+        for (int b = 0; b < 256; b++) {
+            uint8_t v = 0;
+            if (a != 0 && b != 0) {
+                v = gf_exp[gf_log[a] + gf_log[b]];
+            }
+            gf_mul_tab[(a << 8) | b] = v;
+        }
     }
-    return gf_exp[gf_log[a] + gf_log[b]];
+    gf_axpy_init();
 }
 
 uint8_t gf_inv(uint8_t a) {
